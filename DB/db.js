@@ -9,6 +9,7 @@ const connenctToDataBase = async ()=>{
         console.log("Connected to database successfully");
     }catch(err){
         console.log("Error connecting to database:", err);
+        throw err; 
     }
 }
 export default connenctToDataBase;
