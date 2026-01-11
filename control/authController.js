@@ -1,67 +1,102 @@
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import User from "../models/User.js";
+import Employee from "../models/Employee.js";
+
+
 
 const login = async (req, res) => {
-    try{
+    try {
         const { email, password } = req.body;
-        const user = await User.findOne({email});
+        const user = await User.findOne({ email });
 
-        if(!user){
-            return res.status(404).json({success:false , error:"Invalid email or password" });
-        }
-        
+        if (!user) return res.status(404).json({ success: false, error: "Invalid email or password" });
+
         const isMatch = await bcrypt.compare(password, user.password);
-        
-        if(!isMatch){
-            return res.status(404).json({ message: "Wrong password" });
+        if (!isMatch) return res.status(404).json({ message: "Wrong password" });
+
+        // جلب بيانات الموظف
+        const employeeData = await Employee.findOne({ userId: user._id });
+
+        const token = jwt.sign(
+            { _id: user._id, role: user.role }, 
+            process.env.JWT_SECRET, 
+            { expiresIn: '1d' }
+        );
+
+        // بناء كائن الصلاحيات بشكل آمن
+        let inventoryPermissions = null;
+        if (employeeData && employeeData.inventoryPermissions) {
+            const { canManage, canView, accessibleBranches } = employeeData.inventoryPermissions;
+            
+            inventoryPermissions = {
+                // التأكد من إرجاع 'none' إذا كان كلاهما false
+                accessType: canManage ? 'manage' : (canView ? 'view' : 'none'),
+                // التأكد من وجود قيمة للفرع أو إرجاع قيمة افتراضية
+                accessibleBranches: accessibleBranches || 'Cairo'
+            };
         }
-        
-        const token = jwt.sign({ _id: user._id, role: user.role }, process.env.JWT_SECRET, { expiresIn: '1d' });
-        
-        res.status(200).json({success: true , message: "Login successful", token , user: {
-            id: user._id,
-            name: user.name,
-            email: user.email,
-            role: user.role
-        } });
-    }
-    catch(err){
-        res.status(500).json({success: false , message: "Server error", error: err.message });
-        console.error("Error during login process:", err);
+
+        res.status(200).json({
+            success: true,
+            token,
+            user: {
+                _id: user._id,
+                name: user.name,
+                email: user.email,
+                role: user.role,
+                inventoryPermissions: inventoryPermissions
+            }
+        });
+    } catch (err) {
+        console.error("Login Error:", err.message);
+        res.status(500).json({ success: false, error: err.message });
     }
 }
 
 const register = async (req, res) => {
     try {
-        const { name, email, password, role } = req.body;
+        const { name, email, password, role, permissions } = req.body;
         const existingUser = await User.findOne({ email });
         if (existingUser) {
             return res.status(400).json({ success: false, error: "User with this email already exists" });
         }
 
         const userRole = role || 'employee';
+        const userPermissions = permissions || [];
 
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(password, salt);
         const newUser = new User({
             name,
             email,
-            password: hashedPassword, 
-            role: userRole
+            password: hashedPassword,
+            role: userRole,
+            permissions: userPermissions
         });
 
         await newUser.save();
-        const token = jwt.sign({ _id: newUser._id, role: newUser.role }, process.env.JWT_SECRET, { expiresIn: '1d' });
-        res.status(201).json({ 
-            success: true, 
-            message: "User registered successfully", 
-            token, 
+        
+        const token = jwt.sign(
+            { 
+                _id: newUser._id, 
+                role: newUser.role, 
+                permissions: newUser.permissions 
+            }, 
+            process.env.JWT_SECRET, 
+            { expiresIn: '1d' }
+        );
+
+        res.status(201).json({
+            success: true,
+            message: "User registered successfully",
+            token,
             user: {
                 id: newUser._id,
                 name: newUser.name,
                 email: newUser.email,
-                role: newUser.role
+                role: newUser.role,
+                permissions: newUser.permissions
             }
         });
     } catch (err) {
@@ -70,8 +105,8 @@ const register = async (req, res) => {
     }
 };
 
-const verify = (req , res)=>{
-    return res.status(200).json({success:true , user: req.user});
+const verify = (req, res) => {
+    return res.status(200).json({ success: true, user: req.user });
 }
 
 const generateResetToken = async (req, res) => {
@@ -84,10 +119,10 @@ const generateResetToken = async (req, res) => {
         }
         const shortLivedToken = jwt.sign({ _id: user._id }, process.env.JWT_SECRET, { expiresIn: '5m' });
 
-        res.status(200).json({ 
-            success: true, 
+        res.status(200).json({
+            success: true,
             message: "تم توليد رابط التحديث بنجاح.",
-            token: shortLivedToken 
+            token: shortLivedToken
         });
 
     } catch (err) {
@@ -101,14 +136,14 @@ const simpleResetPassword = async (req, res) => {
         const { newPassword } = req.body;
 
         if (!token) {
-             return res.status(400).json({ success: false, error: "رمز التحديث مفقود." });
+            return res.status(400).json({ success: false, error: "رمز التحديث مفقود." });
         }
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        
+
         const user = await User.findById(decoded._id);
 
         if (!user) {
-             return res.status(404).json({ success: false, error: "المستخدم غير موجود أو الرمز غير صالح." });
+            return res.status(404).json({ success: false, error: "المستخدم غير موجود أو الرمز غير صالح." });
         }
 
         const salt = await bcrypt.genSalt(10);
@@ -116,10 +151,10 @@ const simpleResetPassword = async (req, res) => {
         await user.save();
 
         res.status(200).json({ success: true, message: "تم تحديث كلمة المرور بنجاح. يمكنك تسجيل الدخول الآن." });
-        
+
     } catch (err) {
         res.status(400).json({ success: false, message: "رمز التحديث غير صالح أو انتهت صلاحيته.", error: err.message });
     }
 }
 
-export { login , register , verify , generateResetToken , simpleResetPassword };
+export { login, register, verify, generateResetToken, simpleResetPassword };

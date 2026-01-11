@@ -65,6 +65,7 @@ const generateMonthlyReport = async (employeeId, year, month, isIndividualReport
     const totalRequiredHours = totalRequiredWorkDays * DAILY_REQUIRED_HOURS;
     
     const employeeQuery = isIndividualReport ? { employeeId: new mongoose.Types.ObjectId(employeeId) } : {};
+    
     let attendanceRecords = await Attendance.find({
         ...employeeQuery,
         date: { $gte: startOfMonth, $lte: endOfMonth } 
@@ -75,9 +76,10 @@ const generateMonthlyReport = async (employeeId, year, month, isIndividualReport
         select: 'employeeId department userId',
         populate: [
             { path: 'department', select: 'dep_name' },
-            { path: 'userId', select: 'name' }
+            { path: 'userId', select: 'name role' } // أضفنا role للتأكد
         ]
     });
+
     let leaveRecords = await Leave.find({
         ...employeeQuery,
         status: 'Approved',
@@ -86,51 +88,77 @@ const generateMonthlyReport = async (employeeId, year, month, isIndividualReport
             { endDate: { $gte: startOfMonth } }
         ]
     }).select('employeeId startDate endDate leaveType');
+
     const employeeMap = new Map();
-    const allEmployeeIds = new Set([
-        ...attendanceRecords.map(r => r.employeeId._id.toString()),
-        ...leaveRecords.map(r => r.employeeId.toString())
-    ]);
+    const allEmployeeIds = new Set();
     
+    // التعديل الجوهري هنا لاستثناء الأدمين من قائمة التقرير العام
     if (!isIndividualReport) {
         const allEmployees = await Employee.find().select('employeeId department userId')
-           .populate({ path: 'department', select: 'dep_name' })
-           .populate({ path: 'userId', select: 'name' });
+           .populate({ 
+               path: 'userId', 
+               select: 'name role',
+               match: { role: { $ne: 'admin' } } // فلتر لاستثناء الـ admin
+           })
+           .populate({ path: 'department', select: 'dep_name' });
         
         allEmployees.forEach(emp => {
-            allEmployeeIds.add(emp._id.toString());
+            // لا نضيف الموظف للقائمة إلا إذا كان userId موجود (يعني ليس admin)
+            if (emp.userId) {
+                allEmployeeIds.add(emp._id.toString());
+            }
         });
+    } else {
+        // في حالة التقرير الفردي، نضيف المعرف الممرر فقط
+        allEmployeeIds.add(employeeId.toString());
     }
 
     allEmployeeIds.forEach(id => {
-        const empData = attendanceRecords.find(a => a.employeeId._id.toString() === id)?.employeeId || leaveRecords.find(l => l.employeeId.toString() === id)?.employeeId || null;
+        // محاولة إيجاد بيانات الموظف من سجلات الحضور أو الإجازات أو البحث المباشر
+        const empData = attendanceRecords.find(a => a.employeeId && a.employeeId._id.toString() === id)?.employeeId 
+                      || null;
+
         if (!employeeMap.has(id)) {
             employeeMap.set(id, {
-                employeeId: empData?._id || id,
-                name: empData?.userId?.name || 'N/A',
-                employeeID_Number: empData?.employeeId || 'N/A',
-                department: empData?.department?.dep_name || 'N/A',
+                employeeId: id,
+                name: 'N/A', // سيتم تحديثه لاحقاً
+                employeeID_Number: 'N/A',
+                department: 'N/A',
                 presentDays: 0,
                 totalLeaveDays: 0,
                 absenceDays: 0,
                 totalWorkDurationHours: 0,
                 dailyAttendance: [],
                 leaves: [],
-                requiredHours: 0,
+                requiredHours: totalRequiredHours,
                 overtimeHours: 0,
                 shortfallHours: 0,
             });
         }
     });
 
+    // جلب بيانات الموظفين المتبقين بدقة (الاسم والقسم)
+    const detailedEmployees = await Employee.find({ _id: { $in: Array.from(allEmployeeIds) } })
+        .populate('userId', 'name')
+        .populate('department', 'dep_name');
+
+    detailedEmployees.forEach(emp => {
+        if (employeeMap.has(emp._id.toString())) {
+            const entry = employeeMap.get(emp._id.toString());
+            entry.name = emp.userId?.name || 'N/A';
+            entry.employeeID_Number = emp.employeeId || 'N/A';
+            entry.department = emp.department?.dep_name || 'N/A';
+        }
+    });
+
     const reportData = Array.from(employeeMap.values());
     for (const report of reportData) {
         const targetEmployeeId = report.employeeId.toString();
-        const empAttendance = attendanceRecords.filter(a => a.employeeId._id.toString() === targetEmployeeId);
+        const empAttendance = attendanceRecords.filter(a => a.employeeId && a.employeeId._id.toString() === targetEmployeeId);
+        
         report.presentDays = empAttendance.length;
         const totalMinutes = empAttendance.reduce((sum, r) => sum + (r.workDuration || 0), 0);
         report.totalWorkDurationHours = (totalMinutes / 60).toFixed(2);
-        report.requiredHours = totalRequiredHours;
         
         const actualHours = parseFloat(report.totalWorkDurationHours);
         
@@ -149,6 +177,7 @@ const generateMonthlyReport = async (employeeId, year, month, isIndividualReport
         empLeaves.forEach(leave => {
             let start = moment(leave.startDate).tz(LOCAL_TIMEZONE).startOf('day');
             let end = moment(leave.endDate).tz(LOCAL_TIMEZONE).startOf('day');
+            
             if (start.isBefore(moment(startOfMonth).tz(LOCAL_TIMEZONE).startOf('day'))) start = moment(startOfMonth).tz(LOCAL_TIMEZONE).startOf('day');
             if (end.isAfter(moment(endOfMonth).tz(LOCAL_TIMEZONE).startOf('day'))) end = moment(endOfMonth).tz(LOCAL_TIMEZONE).startOf('day');
 
@@ -157,6 +186,7 @@ const generateMonthlyReport = async (employeeId, year, month, isIndividualReport
                 start: start.format('YYYY-MM-DD'),
                 end: end.format('YYYY-MM-DD')
             });
+
             for (let d = start.clone(); d.isSameOrBefore(end); d.add(1, 'days')) {
                 const dateStr = d.format('YYYY-MM-DD');
                 if (d.isoWeekday() !== WEEKEND_DAY && !holidayDates.includes(dateStr)) { 
@@ -176,12 +206,8 @@ const generateMonthlyReport = async (employeeId, year, month, isIndividualReport
             const dateStr = currentDay.format('YYYY-MM-DD');
             const dayOfWeek = currentDay.isoWeekday(); 
             
-            if (dayOfWeek === WEEKEND_DAY) {
-                continue; 
-            }
-            if (holidayDates.includes(dateStr)) {
-                continue;
-            }
+            if (dayOfWeek === WEEKEND_DAY || holidayDates.includes(dateStr)) continue;
+
             if (!coveredDays.has(dateStr)) {
                 absenceCount++;
             }

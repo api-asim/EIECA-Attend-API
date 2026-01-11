@@ -7,7 +7,5 @@ const departmentSchema = new mongoose.Schema({
     updatedAt: { type: Date, default: Date.now }   
 });
 
-
-
 const Department = mongoose.model("Department", departmentSchema);
 export default Department;

@@ -1,7 +1,7 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import connenctToDataBase from "./DB/db.js"; // دالة الاتصال بقاعدة البيانات
+import connenctToDataBase from "./DB/db.js";
 import attendanceRouter from './Routes/attendanceRoute.js';
 import registerRoute from "./Routes/register.js";
 import loginRoute from "./Routes/login.js";
@@ -11,13 +11,14 @@ import salaryRouter from './Routes/salary.js';
 import leaveRouter from './Routes/leave.js';
 import settingRouter from './Routes/setting.js';
 import dashboardRouter from './Routes/dashboard.js';
+import inventoryRouter from './Routes/InventoryRoutes.js';
 
 const app = express();
 dotenv.config();
 
 app.use(cors({
-    origin: process.env.VERCEL_LINK,
-    // origin:'http://localhost:5173',
+    // origin: process.env.VERCEL_LINK,
+    origin:'http://localhost:5173',
     credentials: true,
 }));
 app.use(express.json());
@@ -36,7 +37,8 @@ const startServer = async () => {
         app.use('/' , salaryRouter);
         app.use('/' , leaveRouter);
         app.use('/' , settingRouter);
-        app.use('/' , dashboardRouter);
+        app.use('/api/dashboard' , dashboardRouter);
+        app.use('/api/inventory' , inventoryRouter);
 
         app.get('/', (req, res) => {
             res.send('Welcome to our online shop API...');
