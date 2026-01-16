@@ -17,8 +17,7 @@ const app = express();
 dotenv.config();
 
 app.use(cors({
-    // origin: process.env.VERCEL_LINK,
-    origin:'http://localhost:5173',
+    origin: process.env.VERCEL_LINK,
     credentials: true,
 }));
 app.use(express.json());
