@@ -66,6 +66,7 @@ router.get('/monthly-movement', authMiddelware('inventory:read'), getMonthlyStoc
 router.get('/overall-total', authMiddelware('inventory:read'), getOverallStockTotal);
 router.get('/monthly-movement/location/:locationId', authMiddelware('inventory:read'), getMonthlyStockMovementReportByLocation);
 router.get('/low-stock', authMiddelware('inventory:read'), getLowStockItems);
+// router.get('/low-stock-alerts', authMiddelware('inventory:read'), getLowStockItems);
 
 // --- وظائف إضافية ---
 router.get('/item-details/:id', authMiddelware('inventory:read'), getItemFullDetails);

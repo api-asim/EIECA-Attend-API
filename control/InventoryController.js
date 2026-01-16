@@ -101,113 +101,113 @@ const deleteLocation = async(req, res) => {
 
 
 const addItem = async (req, res) => {
-    try {
-        const { sku, name, description, unitOfMeasure, costPrice, category, branchStocks } = req.body;
-        const userId = req.user._id;
+    try {
+        const { sku, name, description, unitOfMeasure, costPrice, category, branchStocks } = req.body;
+        const userId = req.user._id;
 
-        // 1. التحقق من الحقول الأساسية
-        if (!sku || !name || !category || !costPrice) {
-            return res.status(400).json({ success: false, message: "يرجى إكمال الحقول الأساسية." });
-        }
+        // 1. التحقق من الحقول الأساسية
+        if (!sku || !name || !category || !costPrice) {
+            return res.status(400).json({ success: false, message: "يرجى إكمال الحقول الأساسية." });
+        }
 
-        const cleanSku = sku.toUpperCase().trim();
-        const existingItem = await Item.findOne({ $or: [{ sku: cleanSku }, { name }] });
-        if (existingItem) {
-            return res.status(400).json({ success: false, message: "رمز المنتج (SKU) أو الاسم موجود مسبقاً." });
-        }
+        // 2. التحقق من عدم تكرار المنتج
+        const cleanSku = sku.toUpperCase().trim();
+        const existingItem = await Item.findOne({ $or: [{ sku: cleanSku }, { name }] });
+        if (existingItem) {
+            return res.status(400).json({ success: false, message: "رمز المنتج (SKU) أو الاسم موجود مسبقاً." });
+        }
 
-        // 2. معالجة الصورة باستخدام الـ buffer (لأنك تستخدم memoryStorage)
-        let imageUrl = null;
-        let imagePublicId = null;
+        // 3. معالجة رفع الصورة إلى Cloudinary
+        let imageUrl = null;
+        let imagePublicId = null;
 
-        if (req.file) {
-            try {
-                const uploadRes = await new Promise((resolve, reject) => {
-                    // استخدام upload_stream حصراً للتعامل مع buffer الذاكرة
-                    const stream = cloudinary.uploader.upload_stream(
-                        { 
-                            folder: "inventory_items",
-                            upload_preset: "Employee Platform" 
-                        },
-                        (error, result) => {
-                            if (error) return reject(error);
-                            resolve(result);
-                        }
-                    );
-                    // إرسال الـ buffer الخاص بالملف إلى Cloudinary
-                    stream.end(req.file.buffer);
-                });
-                imageUrl = uploadRes.secure_url;
-                imagePublicId = uploadRes.public_id;
-            } catch (uploadError) {
-                console.error("Cloudinary Error:", uploadError);
-                // السيرفر لن ينهار هنا، سيكمل إضافة الصنف بدون صورة
-            }
-        }
+        if (req.file) {
+            try {
+                const uploadRes = await new Promise((resolve, reject) => {
+                    const stream = cloudinary.uploader.upload_stream(
+                        { 
+                            folder: "inventory_items",
+                            upload_preset: "Employee Platform" 
+                        },
+                        (error, result) => {
+                            if (error) return reject(error);
+                            resolve(result);
+                        }
+                    );
+                    stream.end(req.file.buffer);
+                });
+                imageUrl = uploadRes.secure_url;
+                imagePublicId = uploadRes.public_id;
+            } catch (uploadError) {
+                console.error("Cloudinary Error:", uploadError);
+                // لا نوقف العملية إذا فشل رفع الصورة، نكتفي بتسجيل الخطأ
+            }
+        }
 
-        // 3. حفظ المنتج
-        const newItem = new Item({ 
-            sku: cleanSku, 
-            name, 
-            description, 
-            unitOfMeasure, 
-            costPrice: Number(costPrice),
-            category,
-            imageUrl, 
-            imagePublicId 
-        });
-        await newItem.save();
+        // 4. إنشاء المنتج الجديد
+        const newItem = new Item({ 
+            sku: cleanSku, 
+            name, 
+            description, 
+            unitOfMeasure, 
+            costPrice: Number(costPrice),
+            category,
+            imageUrl, 
+            imagePublicId 
+        });
+        await newItem.save();
 
-        // 4. توزيع الكميات والـ minStockLevel
-        if (branchStocks) {
-            // فك التشفير لأن البيانات تأتي نصية عبر FormData
-            const stocks = typeof branchStocks === 'string' ? JSON.parse(branchStocks) : branchStocks;
-            
-            for (const locationId in stocks) {
-                const stockData = stocks[locationId];
-                
-                // التأكد من جلب القيم سواء كانت رقم مباشر أو Object
-                const qty = typeof stockData === 'object' ? parseInt(stockData.quantity || 0) : parseInt(stockData || 0);
-                const minLevel = typeof stockData === 'object' ? parseInt(stockData.minStockLevel || 0) : 10;
+        // 5. إنشاء سجلات المخزن (Inventory) لكل فرع مختار
+        if (branchStocks) {
+            // تحويل البيانات من نص إلى كائن إذا كانت قادمة كـ FormData
+            const stocks = typeof branchStocks === 'string' ? JSON.parse(branchStocks) : branchStocks;
+            
+            for (const locationId in stocks) {
+                const stockData = stocks[locationId];
+                
+                // استخراج الكمية والحد الأدنى للتنبيه
+                const qty = typeof stockData === 'object' ? parseInt(stockData.quantity || 0) : parseInt(stockData || 0);
+                const minLevel = typeof stockData === 'object' ? parseInt(stockData.minStockLevel || 10) : 10;
 
-                // هنا ملف Inventory.js (الذي أرسلته لك) سيتولى توليد unique_item_location تلقائياً
-                await Inventory.create({
-                    item: newItem._id,
-                    location: locationId,
-                    quantity: qty,
-                    minStockLevel: minLevel,
-                    // توليد المفتاح يدوياً هنا لتخطي الـ Hook في الموديل مؤقتاً
-                    unique_item_location: `${newItem._id}-${locationId}` 
-                });
+                // إنشاء سجل المخزن مع إضافة alertLimit
+                await Inventory.create({
+                    item: newItem._id,
+                    location: locationId,
+                    quantity: qty,
+                    alertLimit: minLevel, // الحقل الجديد لضمان عمل نظام التنبيهات
+                    minStockLevel: minLevel,
+                    unique_item_location: `${newItem._id}-${locationId}` 
+                });
 
-                if (qty > 0) {
-                    await StockMovement.create({
-                        item: newItem._id,
-                        location: locationId,
-                        type: 'إضافة',
-                        quantity: qty,
-                        reference: 'كمية افتتاحية',
-                        reasonType: 'تسوية جرد',
-                        user: userId
-                    });
-                }
-            }
-        }
+                // تسجيل حركة المخزن إذا كانت هناك كمية افتتاحية
+                if (qty > 0) {
+                    await StockMovement.create({
+                        item: newItem._id,
+                        location: locationId,
+                        type: 'إضافة',
+                        quantity: qty,
+                        reference: 'كمية افتتاحية',
+                        reasonType: 'تسوية جرد',
+                        user: userId
+                    });
+                }
+            }
+        }
 
-        return res.status(201).json({ 
-            success: true, 
-            message: 'تم إضافة المنتج بنجاح', 
-            item: newItem 
-        });
+        return res.status(201).json({ 
+            success: true, 
+            message: 'تم إضافة المنتج وتوزيع المخزن بنجاح', 
+            item: newItem 
+        });
 
-    } catch (err) {
-        console.error("Critical Error in addItem:", err); 
-        return res.status(500).json({ 
-            success: false, 
-            message: 'خطأ داخلي في السيرفر', 
-            error: err.message 
-        });
-    }
+    } catch (err) {
+        console.error("Critical Error in addItem:", err); 
+        return res.status(500).json({ 
+            success: false, 
+            message: 'خطأ داخلي في السيرفر أثناء إضافة المنتج', 
+            error: err.message 
+        });
+    }
 };
 
 const getItems = async(req, res) => {
@@ -219,32 +219,80 @@ const getItems = async(req, res) => {
     }
 };
 
-const updateItem = async(req, res) => {
-    try {
-        const { id } = req.params;
-        const { sku, name, description, unitOfMeasure, costPrice, isActive } = req.body;
-        let updateFields = { sku, name, description, unitOfMeasure, costPrice, isActive };
-        
-        const item = await Item.findById(id);
-        if (!item) return res.status(404).json({ success: false, message: 'المنتج غير موجود.' });
+const updateItem = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { sku, name, description, unitOfMeasure, costPrice, isActive, alertLimit } = req.body;
+        
+        let updateFields = { 
+            sku: sku?.toUpperCase().trim(), 
+            name, 
+            description, 
+            unitOfMeasure, 
+            costPrice: costPrice ? Number(costPrice) : undefined, 
+            isActive 
+        };
+        
+        const item = await Item.findById(id);
+        if (!item) return res.status(404).json({ success: false, message: 'المنتج غير موجود.' });
 
-        if (req.file) {
-            const uploadRes = await new Promise((resolve, reject) => {
-                cloudinary.uploader.upload_stream({ upload_preset: "Employee Platform" }, (error, result) => {
-                    if (error) reject(error);
-                    resolve(result);
-                }).end(req.file.buffer);
-            });
-            updateFields.imageUrl = uploadRes.secure_url;
-            updateFields.imagePublicId = uploadRes.public_id;
-            if (item.imagePublicId) await cloudinary.uploader.destroy(item.imagePublicId);
-        }
-        
-        const updatedItem = await Item.findByIdAndUpdate(id, updateFields, { new: true });
-        return res.status(200).json({ success: true, message: 'تم تحديث المنتج بنجاح', item: updatedItem });
-    } catch (err) {
-        return res.status(500).json({ success: false, message: 'خطأ في تحديث المنتج.' });
-    }
+        // 1. معالجة تحديث الصورة
+        if (req.file) {
+            try {
+                const uploadRes = await new Promise((resolve, reject) => {
+                    const stream = cloudinary.uploader.upload_stream(
+                        { folder: "inventory_items", upload_preset: "Employee Platform" },
+                        (error, result) => {
+                            if (error) return reject(error);
+                            resolve(result);
+                        }
+                    );
+                    stream.end(req.file.buffer);
+                });
+
+                updateFields.imageUrl = uploadRes.secure_url;
+                updateFields.imagePublicId = uploadRes.public_id;
+
+                // حذف الصورة القديمة من Cloudinary لتوفير المساحة
+                if (item.imagePublicId) {
+                    await cloudinary.uploader.destroy(item.imagePublicId);
+                }
+            } catch (imgError) {
+                console.error("Cloudinary Update Error:", imgError);
+            }
+        }
+        
+        // 2. تحديث بيانات المنتج الأساسية
+        const updatedItem = await Item.findByIdAndUpdate(id, updateFields, { new: true });
+
+        // 3. التحديث الهام: مزامنة حد التنبيه (alertLimit) في جدول المخازن
+        // إذا قام الأدمن بتغيير حد التنبيه، يجب أن ينعكس ذلك على كافة الفروع لهذا المنتج
+        if (alertLimit !== undefined) {
+            await Inventory.updateMany(
+                { item: id },
+                { 
+                    $set: { 
+                        alertLimit: Number(alertLimit),
+                        minStockLevel: Number(alertLimit) // للمزامنة مع الحقل القديم أيضاً
+                    } 
+                }
+            );
+        }
+
+        return res.status(200).json({ 
+            success: true, 
+            message: 'تم تحديث المنتج وحدود التنبيه بنجاح', 
+            item: updatedItem 
+        });
+
+    } catch (err) {
+        console.error("Update Error:", err);
+        return res.status(500).json({ 
+            success: false, 
+            message: 'خطأ في تحديث المنتج.',
+            error: err.message 
+        });
+    }
 };
 
 const deleteItem = async(req, res) => {
@@ -492,17 +540,12 @@ const getInventoryReport = async (req, res) => {
     try {
         const user = req.user;
         let query = {};
+        if (user.role !== 'admin' && user.location) { query.location = user.location; }
 
-        if (user.role !== 'admin' && user.location) {
-            query.location = user.location;
-        }
-
-        const reportData = await Inventory.find(query)
-            .populate('item')
-            .populate({
-                path: 'location',
-                populate: { path: 'manager', populate: { path: 'userId', select: 'name' } }
-            });
+        const reportData = await Inventory.find(query).populate('item').populate({
+            path: 'location',
+            populate: { path: 'manager', populate: { path: 'userId', select: 'name' } }
+        });
 
         const report = reportData
             .filter(record => record.item)
@@ -512,8 +555,8 @@ const getInventoryReport = async (req, res) => {
                 itemSku: record.item.sku,
                 locationName: record.location?.name || 'موقع غير معروف',
                 currentQuantity: record.quantity,
-                minStockLevel: record.minStockLevel || 0,
-                isLowStock: record.quantity <= (record.minStockLevel || 0),
+                alertLimit: record.alertLimit || record.minStockLevel || 0,
+                isLowStock: record.quantity <= (record.alertLimit || record.minStockLevel || 0),
                 imageUrl: record.item.imageUrl
             }));
 
@@ -567,87 +610,148 @@ const updateItems = async (req, res) => {
 };
 
 const getItemFullDetails = async (req, res) => {
-    try {
-        const { id } = req.params;
-        const item = await Item.findById(id).populate('category');
-        if (!item) return res.status(404).json({ success: false, message: "الصنف غير موجود" });
+    try {
+        const { id } = req.params;
+        const item = await Item.findById(id).populate('category');
+        if (!item) return res.status(404).json({ success: false, message: "الصنف غير موجود" });
 
-        const inventoryRecords = await Inventory.find({ item: id }).populate('location');
-        const branchDetails = inventoryRecords.map(rec => ({
-            locationId: rec.location?._id,
-            locationName: rec.location?.name,
-            quantity: rec.quantity,
-            minStockLevel: rec.minStockLevel || 0
-        }));
+        const inventoryRecords = await Inventory.find({ item: id }).populate('location');
+        const branchDetails = inventoryRecords.map(rec => ({
+            locationId: rec.location?._id,
+            locationName: rec.location?.name,
+            quantity: rec.quantity,
+            alertLimit: rec.alertLimit || rec.minStockLevel || 0 
+        }));
 
-        res.status(200).json({
-            success: true,
-            data: {
-                itemId: item._id, itemName: item.name, itemSku: item.sku,
-                categoryId: item.category?._id, description: item.description,
-                branchDetails: branchDetails, imageUrl: item.imageUrl
-            }
-        });
-    } catch (err) {
-        res.status(500).json({ success: false, message: "خطأ في جلب التفاصيل" });
-    }
+        res.status(200).json({
+            success: true,
+            data: {
+                itemId: item._id, itemName: item.name, itemSku: item.sku,
+                categoryId: item.category?._id, description: item.description,
+                branchDetails: branchDetails, imageUrl: item.imageUrl
+            }
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, message: "خطأ في جلب التفاصيل" });
+    }
 };
 
 const bulkUpdateItem = async (req, res) => {
-    try {
-        const { id } = req.params;
-        const { name, sku, category, description, stocks } = req.body;
-        const userId = req.user._id;
+    try {
+        const { id } = req.params;
+        const { name, sku, category, description, stocks } = req.body;
+        const userId = req.user._id;
 
-        await Item.findByIdAndUpdate(id, { name, sku: sku.toUpperCase().trim(), category, description });
+        await Item.findByIdAndUpdate(id, { name, sku: sku.toUpperCase().trim(), category, description });
 
-        if (stocks && Array.isArray(stocks)) {
-            for (const stock of stocks) {
-                const uniqueKey = `${id}-${stock.locationId}`;
-                const oldRecord = await Inventory.findOne({ unique_item_location: uniqueKey });
-                const oldQty = oldRecord ? oldRecord.quantity : 0;
+        if (stocks && Array.isArray(stocks)) {
+            for (const stock of stocks) {
+                const uniqueKey = `${id}-${stock.locationId}`;
+                const oldRecord = await Inventory.findOne({ unique_item_location: uniqueKey });
+                const oldQty = oldRecord ? oldRecord.quantity : 0;
 
-                await Inventory.findOneAndUpdate(
-                    { unique_item_location: uniqueKey },
-                    { 
-                        item: id, location: stock.locationId, 
-                        quantity: stock.quantity, minStockLevel: stock.minStockLevel,
-                        lastUpdated: Date.now() 
-                    },
-                    { upsert: true }
-                );
+                await Inventory.findOneAndUpdate(
+                    { unique_item_location: uniqueKey },
+                    { 
+                        item: id, 
+                        location: stock.locationId, 
+                        quantity: stock.quantity, 
+                        alertLimit: stock.alertLimit, 
+                        minStockLevel: stock.alertLimit, 
+                        lastUpdated: Date.now() 
+                    },
+                    { upsert: true }
+                );
 
-                if (oldQty !== stock.quantity) {
-                    await StockMovement.create({
-                        item: id, location: stock.locationId,
-                        type: stock.quantity > oldQty ? 'إضافة' : 'خصم',
-                        quantity: Math.abs(stock.quantity - oldQty),
-                        reference: 'تعديل شامل من الإدارة', reasonType: 'تسوية جرد', user: userId
-                    });
-                }
-            }
-        }
-        res.status(200).json({ success: true, message: "تم تحديث الصنف والكميات بنجاح" });
-    } catch (err) {
-        res.status(500).json({ success: false, message: "خطأ في التحديث الشامل" });
-    }
+                if (oldQty !== stock.quantity) {
+                    await StockMovement.create({
+                        item: id, location: stock.locationId,
+                        type: stock.quantity > oldQty ? 'إضافة' : 'خصم',
+                        quantity: Math.abs(stock.quantity - oldQty),
+                        reference: 'تعديل شامل من الإدارة', reasonType: 'تسوية جرد', user: userId
+                    });
+                }
+            }
+        }
+        res.status(200).json({ success: true, message: "تم تحديث الصنف والكميات وحد التنبيه بنجاح" });
+    } catch (err) {
+        res.status(500).json({ success: false, message: "خطأ في التحديث الشامل" });
+    }
 };
 
 const getLowStockItems = async (req, res) => {
     try {
-        const user = req.user;
-        let query = { $expr: { $lte: ["$quantity", "$minStockLevel"] } };
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 10;
+        const skip = (page - 1) * limit;
+        
+        let query = {};
+        
+        // منطق التعامل مع صلاحيات الفروع
+        if (req.user.role !== 'admin') {
+            const employee = await Employee.findOne({ userId: req.user._id });
+            
+            if (!employee || (!employee.branch && !employee.location)) {
+                return res.status(200).json({ success: true, lowStockItems: [], count: 0 });
+            }
 
-        if (user.role !== 'admin' && user.location) {
-            query.location = user.location;
+            const branchValue = employee.branch || employee.location;
+
+            // حل مشكلة "Cairo": إذا كانت القيمة نصاً وليست ID
+            if (typeof branchValue === 'string' && branchValue.length !== 24) {
+                // نبحث في جدول Locations عن موقع اسمه يحتوي على كلمة الفرع (مثلاً "مخزن القاهرة")
+                const actualLocation = await Location.findOne({ 
+                    name: { $regex: branchValue, $options: 'i' } 
+                });
+                
+                if (actualLocation) {
+                    query.location = actualLocation._id;
+                } else {
+                    // إذا لم نجد موقع مطابق، نعيد نتيجة فارغة بأمان بدلاً من الانهيار
+                    return res.status(200).json({ success: true, lowStockItems: [], count: 0 });
+                }
+            } else {
+                query.location = branchValue;
+            }
+        } else if (req.query.locationId && req.query.locationId !== 'all') {
+            query.location = req.query.locationId;
         }
 
-        const lowStockRecords = await Inventory.find(query).populate('item location');
-        return res.status(200).json({ success: true, count: lowStockRecords.length, lowStockItems: lowStockRecords });
-    } catch (err) {
-        return res.status(500).json({ success: false, message: 'خطأ في جلب الأصناف المنخفضة.' });
+        // الاستعلام عن النواقص باستخدام alertLimit مع دعم السجلات القديمة
+        const lowStockQuery = {
+            ...query,
+            $expr: { 
+                $lte: ["$quantity", { $ifNull: ["$alertLimit", { $ifNull: ["$minStockLevel", 10] }] }] 
+            }
+        };
+
+        const [total, items] = await Promise.all([
+            Inventory.countDocuments(lowStockQuery),
+            Inventory.find(lowStockQuery)
+                .populate('item', 'name sku imageUrl')
+                .populate('location', 'name')
+                .skip(skip)
+                .limit(limit)
+                .sort({ quantity: 1 })
+        ]);
+
+        res.status(200).json({
+            success: true,
+            lowStockItems: items,
+            count: total, // سيجعل الرقم يظهر في الجرس فوراً
+            pagination: {
+                total,
+                page,
+                pages: Math.ceil(total / limit),
+                pageSize: limit
+            }
+        });
+    } catch (error) {
+        console.error("Critical Low Stock Error:", error);
+        res.status(500).json({ success: false, message: "Internal Server Error" });
     }
 };
+
 
 const getMonthlyStockMovementReport = async (req, res) => {
     try {

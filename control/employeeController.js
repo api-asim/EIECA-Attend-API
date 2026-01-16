@@ -187,11 +187,29 @@ const getMyProfile = async (req, res) => {
         if (!employee) {
             return res.status(404).json({ success: false, message: 'Employee not found' });
         }
+
         const formattedEmployee = employee.toObject();
+
+        // --- التعديل الجوهري هنا ---
+        // تحويل الـ ID الخاص بالفرع إلى اسم نصي مفهوم للفلترة في الفرونت إند
+        let branchDisplay = "";
+        // ID المنصورة من صورتك ينتهي بـ 3703
+        if (employee.branch === "6788e0261394c866c1383703" || employee.branch === "Mansoura") {
+            branchDisplay = "مخزن المنصورة";
+        } 
+        // ID القاهرة من صورتك ينتهي بـ 36f4
+        else if (employee.branch === "6788dfcf1394c866c13836f4" || employee.branch === "Cairo") {
+            branchDisplay = "مخزن القاهرة";
+        } else {
+            branchDisplay = employee.branch; // أي قيمة أخرى
+        }
+
+        formattedEmployee.branchName = branchDisplay; 
+        
         formattedEmployee.inventoryPermissions = {
             accessType: employee.inventoryPermissions.canManage ? 'manage' : 
-                       (employee.inventoryPermissions.canView ? 'view' : 'none'),
-            accessibleBranches: employee.inventoryPermissions.accessibleBranches || 'Cairo'
+                        (employee.inventoryPermissions.canView ? 'view' : 'none'),
+            accessibleBranches: employee.inventoryPermissions.accessibleBranches || branchDisplay
         };
 
         return res.status(200).json({ 

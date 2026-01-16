@@ -12,15 +12,14 @@ const employeeSchema = new Schema({
 
     branch: { 
         type: String, 
-        enum: ['Cairo', 'Mansoura', 'Both'], 
+        enum: ['Cairo', 'Mansoura', 'Both', 'مخزن القاهرة', 'مخزن المنصورة'], 
         required: true,
         default: 'Cairo'
     },
-
     inventoryPermissions: {
         canView: { type: Boolean, default: false },
         canManage: { type: Boolean, default: false },
-        accessibleBranches: { type: String, enum: ['Cairo', 'Mansoura', 'Both'], default: 'Cairo' }
+        accessibleBranches: { type: String, default: 'Cairo' } 
     },
 
     phoneNumber: {

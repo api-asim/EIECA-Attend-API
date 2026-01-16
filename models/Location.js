@@ -1,19 +1,10 @@
 import mongoose from "mongoose";
-import { Schema } from "mongoose";
+const { Schema } = mongoose;
 
 const locationSchema = new Schema(
     {
-        name: {
-            type: String,
-            required: true,
-            unique: true,
-            trim: true
-        },
-        city: {
-            type: String,
-            required: true,
-            trim: true
-        },
+        name: { type: String, required: true, unique: true, trim: true },
+        city: { type: String, required: true },
         address: {
             type: String,
             default: null,
@@ -24,12 +15,20 @@ const locationSchema = new Schema(
             ref: 'Employee',
             default: null,
             required: false 
+        },
+        branchCode: {
+            type: String,
+            unique: true,
+            sparse: true,
+            uppercase: true
         }
     },
     {
         timestamps: true 
     }
 );
+
+locationSchema.index({ name: 1 });
 
 const Location = mongoose.model("Location", locationSchema);
 export default Location;
