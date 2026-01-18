@@ -1,31 +1,16 @@
 import express from 'express';
 import authMiddelware from '../Middelware/authMiddelware.js';
 import { 
-    addCategory, 
-    addItem, 
-    addLocation, 
-    confirmStockTransfer, 
-    deleteItem, 
-    deleteLocation, 
-    getCategories, 
-    getInventoryReport, 
-    getItems, 
-    getLocations, 
-    getMonthlyStockMovementReport, 
-    getMonthlyStockMovementReportByLocation, 
-    getOverallStockTotal, 
-    initiateStockTransfer, 
-    stockIn, 
-    stockOut, 
-    updateLocation,
-    adjustPhysicalInventory, 
-    getLowStockItems, 
-    upload, 
-    deleteCategory, 
-    getItemById, 
-    updateItems, // الدالة التي أصلحنا منطقها
-    getItemFullDetails,
-    bulkUpdateItem
+    addCategory, addItem, addLocation, confirmStockTransfer, 
+    deleteItem, deleteLocation, getCategories, getInventoryReport, 
+    getItems, getLocations, getMonthlyStockMovementReport, 
+    getMonthlyStockMovementReportByLocation, getOverallStockTotal, 
+    initiateStockTransfer, stockIn, stockOut, updateLocation,
+    adjustPhysicalInventory, getLowStockItems, upload, 
+    deleteCategory, getItemById, updateItems, getItemFullDetails,
+    bulkUpdateItem,
+    // الدوال الجديدة التي سنضيفها الآن
+    getNotifications, markNotificationAsRead, getTransferAnalytics
 } from '../control/InventoryController.js';
 
 const router = express.Router();
@@ -40,10 +25,7 @@ router.delete('/location/:id', authMiddelware('inventory:write'), deleteLocation
 router.get('/items', authMiddelware('inventory:read'), getItems);
 router.get('/item/:id', authMiddelware('inventory:read'), getItemById);
 router.post('/add-item', authMiddelware('inventory:write'), upload.single('itemImage'), addItem);
-
-// ملاحظة: تم دمج updateItems هنا مع دعم رفع الصور لضمان استقبال الكمية والسعر بشكل صحيح
 router.put('/item/:id', authMiddelware('inventory:write'), upload.single('itemImage'), updateItems);
-
 router.delete('/item/:id', authMiddelware('inventory:write'), deleteItem);
 
 // --- مسارات الأقسام (Categories) ---
@@ -56,17 +38,24 @@ router.post('/stock-in', authMiddelware('inventory:write'), stockIn);
 router.post('/stock-out', authMiddelware('inventory:write'), stockOut);
 router.post('/adjust', authMiddelware('inventory:write'), adjustPhysicalInventory);
 
-// --- عمليات التحويل بين المخازن ---
+// --- عمليات التحويل بين المخازن (المطورة) ---
 router.post('/transfer/initiate', authMiddelware('inventory:write'), initiateStockTransfer);
-router.post('/transfer/confirm/:transferId', authMiddelware('inventory:write'), confirmStockTransfer);
+// تعديل: تمرير البيانات في الـ body بدلاً من الـ Params لسهولة التعامل مع "العجز"
+router.post('/transfer/confirm', authMiddelware('inventory:write'), confirmStockTransfer); 
 
-// --- التقارير والتنبيهات ---
+// --- منظومة الإشعارات (الجديدة كلياً) ---
+// جلب الإشعارات الخاصة بالمستخدم (الجرس)
+router.get('/notifications', authMiddelware('inventory:read'), getNotifications);
+// تحديد إشعار كمقروء (منطق تعدد الآدمن)
+router.put('/notifications/:notificationId/read', authMiddelware('inventory:read'), markNotificationAsRead);
+
+// --- التقارير والتحليلات ---
 router.get('/report', authMiddelware('inventory:read'), getInventoryReport);
+router.get('/transfer-analytics', authMiddelware('inventory:read'), getTransferAnalytics); // ملخص التحويلات والعجز
 router.get('/monthly-movement', authMiddelware('inventory:read'), getMonthlyStockMovementReport);
 router.get('/overall-total', authMiddelware('inventory:read'), getOverallStockTotal);
 router.get('/monthly-movement/location/:locationId', authMiddelware('inventory:read'), getMonthlyStockMovementReportByLocation);
 router.get('/low-stock', authMiddelware('inventory:read'), getLowStockItems);
-// router.get('/low-stock-alerts', authMiddelware('inventory:read'), getLowStockItems);
 
 // --- وظائف إضافية ---
 router.get('/item-details/:id', authMiddelware('inventory:read'), getItemFullDetails);

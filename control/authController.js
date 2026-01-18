@@ -15,24 +15,25 @@ const login = async (req, res) => {
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) return res.status(404).json({ message: "Wrong password" });
 
-        // جلب بيانات الموظف
         const employeeData = await Employee.findOne({ userId: user._id });
 
+        // --- التعديل هنا: إضافة الـ location داخل التوكن لزيادة سرعة الـ Middleware ---
         const token = jwt.sign(
-            { _id: user._id, role: user.role }, 
+            { 
+                _id: user._id, 
+                role: user.role,
+                location: user.location // سيقرأه الـ Middleware الآن مباشرة
+            }, 
             process.env.JWT_SECRET, 
             { expiresIn: '1d' }
         );
 
-        // بناء كائن الصلاحيات بشكل آمن
         let inventoryPermissions = null;
         if (employeeData && employeeData.inventoryPermissions) {
             const { canManage, canView, accessibleBranches } = employeeData.inventoryPermissions;
             
             inventoryPermissions = {
-                // التأكد من إرجاع 'none' إذا كان كلاهما false
                 accessType: canManage ? 'manage' : (canView ? 'view' : 'none'),
-                // التأكد من وجود قيمة للفرع أو إرجاع قيمة افتراضية
                 accessibleBranches: accessibleBranches || 'Cairo'
             };
         }
@@ -45,6 +46,7 @@ const login = async (req, res) => {
                 name: user.name,
                 email: user.email,
                 role: user.role,
+                location: user.location, // إرجاع الموقع للفرونت إند
                 inventoryPermissions: inventoryPermissions
             }
         });
@@ -52,11 +54,11 @@ const login = async (req, res) => {
         console.error("Login Error:", err.message);
         res.status(500).json({ success: false, error: err.message });
     }
-}
+};
 
 const register = async (req, res) => {
     try {
-        const { name, email, password, role, permissions } = req.body;
+        const { name, email, password, role, permissions, location } = req.body;
         const existingUser = await User.findOne({ email });
         if (existingUser) {
             return res.status(400).json({ success: false, error: "User with this email already exists" });
@@ -67,12 +69,15 @@ const register = async (req, res) => {
 
         const salt = await bcrypt.genSalt(10);
         const hashedPassword = await bcrypt.hash(password, salt);
+        
+        // --- التعديل: إضافة location للسكيما ---
         const newUser = new User({
             name,
             email,
             password: hashedPassword,
             role: userRole,
-            permissions: userPermissions
+            permissions: userPermissions,
+            location: location || null // حفظ الموقع إذا تم إرساله
         });
 
         await newUser.save();
@@ -80,8 +85,8 @@ const register = async (req, res) => {
         const token = jwt.sign(
             { 
                 _id: newUser._id, 
-                role: newUser.role, 
-                permissions: newUser.permissions 
+                role: newUser.role,
+                location: newUser.location 
             }, 
             process.env.JWT_SECRET, 
             { expiresIn: '1d' }
@@ -96,6 +101,7 @@ const register = async (req, res) => {
                 name: newUser.name,
                 email: newUser.email,
                 role: newUser.role,
+                location: newUser.location,
                 permissions: newUser.permissions
             }
         });

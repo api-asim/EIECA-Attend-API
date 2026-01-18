@@ -10,15 +10,18 @@ const employeeSchema = new Schema({
     designation: { type: String },
     department: { type: Schema.Types.ObjectId, ref: 'Department', required: true },
 
+    // --- التعديل الجوهري هنا ---
+    // تم تغيير النوع من String إلى ObjectId ليرتبط بجدول الـ Location مباشرة
     branch: { 
-        type: String, 
-        enum: ['Cairo', 'Mansoura', 'Both', 'مخزن القاهرة', 'مخزن المنصورة'], 
-        required: true,
-        default: 'Cairo'
+        type: Schema.Types.ObjectId, 
+        ref: 'Location', 
+        required: true 
     },
+    
     inventoryPermissions: {
         canView: { type: Boolean, default: false },
         canManage: { type: Boolean, default: false },
+        // تم ترك هذا كـ String مؤقتاً إذا كنت تستخدمه لنصوص وصفية مثل "كل الفروع"
         accessibleBranches: { type: String, default: 'Cairo' } 
     },
 
@@ -32,5 +35,6 @@ const employeeSchema = new Schema({
     updateAt: { type: Date, default: Date.now },
 });
 
+// تم حذف الـ Index اليدوي لتجنب رسالة "Duplicate schema index" في الـ Console
 const Employee = mongoose.model('Employee', employeeSchema);
 export default Employee;

@@ -13,11 +13,13 @@ import settingRouter from './Routes/setting.js';
 import dashboardRouter from './Routes/dashboard.js';
 import inventoryRouter from './Routes/InventoryRoutes.js';
 
+
 const app = express();
 dotenv.config();
 
 app.use(cors({
     origin: process.env.VERCEL_LINK,
+    // origin:'http://localhost:5173',
     credentials: true,
 }));
 app.use(express.json());
@@ -54,3 +56,10 @@ const startServer = async () => {
 }
 
 startServer();
+
+
+
+
+
+
+    // origin: process.env.VERCEL_LINK,

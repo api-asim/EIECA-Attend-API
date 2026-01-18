@@ -8,6 +8,9 @@ import StockTransfer from "../models/StockTransfer.js";
 import cloudinary from '../utils/cloudinary.js';
 import multer from "multer";
 import mongoose from "mongoose";
+import User from "../models/User.js";
+import Notification from "../models/Notification.js";
+
 
 const storage = multer.memoryStorage();
 const upload = multer({ storage: storage });
@@ -48,8 +51,16 @@ const getLocations = async(req, res) => {
     try {
         const user = req.user;
         let filter = {};
-        if (user.role !== 'admin' && user.location) {
-            filter = { _id: user.location };
+
+        if (user.role !== 'admin') {
+            // جلب بيانات الموظف للتحقق من الصلاحيات المحدثة
+            const employee = await Employee.findOne({ userId: user._id });
+            const canAccessBoth = employee?.inventoryPermissions?.accessibleBranches === 'Both';
+
+            // إذا لم يكن لديه صلاحية الوصول للكل، نحصره في فرعه المسجل فقط
+            if (!canAccessBoth && user.location) {
+                filter = { _id: user.location };
+            }
         }
 
         const locations = await Location.find(filter).populate({
@@ -210,13 +221,58 @@ const addItem = async (req, res) => {
     }
 };
 
-const getItems = async(req, res) => {
-    try {
-        const items = await Item.find({ isActive: true }).populate('category'); 
-        return res.status(200).json({ success: true, items });
-    } catch (err) {
-        return res.status(500).json({ success: false, message: 'خطأ في استرجاع المنتجات.' });
-    }
+const getItems = async (req, res) => {
+    try {
+        const { role, location, _id } = req.user;
+        let query = {};
+
+        if (role === 'employee') {
+            const employee = await Employee.findOne({ userId: _id });
+            const canAccessBoth = employee?.inventoryPermissions?.accessibleBranches === 'Both';
+
+            if (!canAccessBoth) {
+                if (!location) {
+                    return res.status(403).json({ 
+                        success: false, 
+                        message: "حسابك غير مرتبط بموقع مخزني محدد. يرجى مراجعة المسؤول." 
+                    });
+                }
+                query.location = location;
+            }
+        }
+
+        const inventoryItems = await Inventory.find(query)
+            .populate({
+                path: 'item',
+                populate: { path: 'category', select: 'name' } 
+            })
+            .populate('location', 'name') 
+            .sort({ updatedAt: -1 });
+
+        const formattedItems = inventoryItems.map(inv => ({
+            inventoryId: inv._id,
+            itemId: inv.item?._id,
+            name: inv.item?.name || "صنف محذوف",
+            sku: inv.item?.sku,
+            category: inv.item?.category?.name,
+            image: inv.item?.imageUrl || inv.item?.itemImage, // تأمين جلب الصورة من كلا الحقلين
+            quantity: inv.quantity,
+            locationName: inv.location?.name,
+            locationId: inv.location?._id,
+            price: inv.item?.costPrice || inv.item?.price,
+            lowStockLevel: inv.item?.alertLimit || inv.item?.lowStockLevel
+        }));
+
+        return res.status(200).json({ 
+            success: true, 
+            count: formattedItems.length,
+            items: formattedItems 
+        });
+
+    } catch (err) {
+        console.error("Error in getItems:", err);
+        return res.status(500).json({ success: false, message: "حدث خطأ أثناء جلب الأصناف." });
+    }
 };
 
 const updateItem = async (req, res) => {
@@ -358,31 +414,43 @@ const stockIn = async (req, res) => {
         const { itemId, locationId, quantityAdded, reference, reasonType } = req.body;
         const user = req.user;
 
+        // التحقق من الصلاحية: الأدمن مسموح له بكل شيء، الموظف فقط لفرعه
         if (user.role !== 'admin' && user.location.toString() !== locationId) {
             return res.status(403).json({ success: false, message: "لا تملك صلاحية الإضافة لمخزن فرع آخر." });
         }
 
         const qty = parseInt(quantityAdded);
+
+        // 1. تسجيل حركة المخزن (Stock Movement) مع ربطها بالموظف
         const newMovement = new StockMovement({
             item: itemId,
             location: locationId,
             type: 'إضافة',
             quantity: qty,
             reference: reference || 'إضافة مخزون يدوية',
-            user: user._id,
+            user: user._id, // ربط الموظف بالعملية
             reasonType: reasonType
         });
         await newMovement.save();
 
+        // 2. تحديث سجل الـ Inventory باستخدام الـ uniqueKey القديم لضمان عدم التعارض
         const uniqueKey = `${itemId}-${locationId}`;
         const inventoryRecord = await Inventory.findOneAndUpdate(
             { unique_item_location: uniqueKey },
-            { $inc: { quantity: qty }, $set: { lastUpdated: Date.now() } },
+            { 
+                $inc: { quantity: qty }, 
+                $set: { lastUpdated: Date.now(), item: itemId, location: locationId } 
+            },
             { new: true, upsert: true }
         );
 
-        return res.status(200).json({ success: true, message: `تم إضافة ${qty} وحدة بنجاح.`, inventory: inventoryRecord });
+        return res.status(200).json({ 
+            success: true, 
+            message: `تم إضافة ${qty} وحدة بنجاح.`, 
+            inventory: inventoryRecord 
+        });
     } catch (err) {
+        console.error("StockIn Error:", err);
         return res.status(500).json({ success: false, message: 'خطأ في إضافة المخزون.' });
     }
 };
@@ -392,18 +460,25 @@ const stockOut = async (req, res) => {
         const { itemId, locationId, quantityRemoved, reference, reasonType } = req.body; 
         const user = req.user;
 
+        // التحقق من الصلاحية
         if (user.role !== 'admin' && user.location.toString() !== locationId) {
             return res.status(403).json({ success: false, message: "لا تملك صلاحية الخصم من مخزن فرع آخر." });
         }
 
         const qty = parseInt(quantityRemoved);
         const uniqueKey = `${itemId}-${locationId}`;
-        let inventoryRecord = await Inventory.findOne({ unique_item_location: uniqueKey });
+        
+        // جلب سجل المخزون مع بيانات الصنف لفحص حد الأمان
+        let inventoryRecord = await Inventory.findOne({ unique_item_location: uniqueKey }).populate('item');
 
         if (!inventoryRecord || inventoryRecord.quantity < qty) {
-            return res.status(400).json({ success: false, message: `مخزون غير كافٍ. المتوفر: ${inventoryRecord?.quantity || 0}` });
+            return res.status(400).json({ 
+                success: false, 
+                message: `مخزون غير كافٍ. المتوفر: ${inventoryRecord?.quantity || 0}` 
+            });
         }
         
+        // 1. تسجيل حركة المخزن
         const newMovement = new StockMovement({
             item: itemId,
             location: locationId,
@@ -415,12 +490,29 @@ const stockOut = async (req, res) => {
         });
         await newMovement.save();
 
+        // 2. تحديث الكمية في الـ Inventory
         inventoryRecord.quantity -= qty;
         inventoryRecord.lastUpdated = Date.now();
         await inventoryRecord.save();
+
+        // 3. التنبيه الذكي: إذا وصل المخزون لحد الأمان، أرسل إشعاراً للآدمنز
+        if (inventoryRecord.item && inventoryRecord.quantity <= inventoryRecord.item.lowStockLevel) {
+            await sendSystemNotification({
+                senderId: user._id,
+                title: "⚠️ تنبيه: نقص في المخزون",
+                message: `الصنف [${inventoryRecord.item.name}] في المخزن [${locationId}] وصل للحد الأدنى. المتبقي: ${inventoryRecord.quantity}`,
+                type: 'low_stock',
+                relatedId: inventoryRecord.item._id
+            });
+        }
         
-        return res.status(200).json({ success: true, message: `تم خصم ${qty} وحدة بنجاح.`, inventory: inventoryRecord });
+        return res.status(200).json({ 
+            success: true, 
+            message: `تم خصم ${qty} وحدة بنجاح.`, 
+            inventory: inventoryRecord 
+        });
     } catch (err) {
+        console.error("StockOut Error:", err);
         return res.status(500).json({ success: false, message: 'خطأ في خصم المخزون.' });
     }
 };
@@ -464,73 +556,115 @@ const adjustPhysicalInventory = async (req, res) => {
 
 const initiateStockTransfer = async (req, res) => {
     try {
-        const { sourceLocationId, destinationLocationId, itemId, quantity, reference } = req.body;
-        const user = req.user;
+        const { sourceLocation, destinationLocation, item, shippedQuantity, type } = req.body;
+        const initiatorId = req.user.id; // معترض الصلاحيات (Auth middleware)
 
-        if (user.role !== 'admin' && user.location.toString() !== sourceLocationId) {
-            return res.status(403).json({ success: false, message: "لا يمكنك بدء تحويل من مخزن لا تديره." });
+        // 1. توليد رقم مرجعي فريد
+        const reference = `TR-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+
+        // 2. التحقق من توفر الكمية في المخزن الراسل
+        const inventory = await Inventory.findOne({ item, location: sourceLocation });
+        if (!inventory || inventory.quantity < shippedQuantity) {
+            return res.status(400).json({ success: false, message: "الكمية غير كافية في المخزن المصدر." });
         }
 
-        const qty = parseInt(quantity);
-        if (sourceLocationId === destinationLocationId) return res.status(400).json({ success: false, message: "لا يمكن النقل لنفس الموقع." });
-
-        const sourceInv = await Inventory.findOne({ item: itemId, location: sourceLocationId });
-        if (!sourceInv || sourceInv.quantity < qty) return res.status(400).json({ success: false, message: "المخزون غير كافٍ بالمصدر." });
-
-        const outgoingMovement = new StockMovement({
-            item: itemId, location: sourceLocationId, type: 'خصم', quantity: qty,
-            reference: `تحويل صادر: ${reference || ''}`, user: user._id, reasonType: 'التحويل'
+        // 3. إنشاء سجل التحويل
+        const transfer = new StockTransfer({
+            reference,
+            sourceLocation,
+            destinationLocation,
+            item,
+            shippedQuantity,
+            status: 'جاري النقل',
+            initiatedBy: initiatorId
         });
-        await outgoingMovement.save();
 
-        sourceInv.quantity -= qty;
-        await sourceInv.save();
+        // 4. خصم الكمية من المخزن المصدر فوراً (تعليق البضاعة)
+        inventory.quantity -= shippedQuantity;
+        await inventory.save();
 
-        const newTransfer = new StockTransfer({
-            sourceLocation: sourceLocationId, destinationLocation: destinationLocationId,
-            item: itemId, quantity: qty, reference, status: 'جاري النقل', 
-            outgoingMovementId: outgoingMovement._id, initiatedBy: user._id
+        // 5. تسجيل حركة مخزنية (خروج)
+        const moveOut = await StockMovement.create({
+            item,
+            location: sourceLocation,
+            quantity: shippedQuantity,
+            type: 'تحويل_صادر',
+            createdAt: new Date()
         });
-        await newTransfer.save();
+        transfer.outgoingMovementId = moveOut._id;
+        await transfer.save();
 
-        return res.status(201).json({ success: true, message: 'بدأت عملية النقل.', transfer: newTransfer });
+        // 6. إرسال الإشعارات (لفرع المستلم وللآدمنز)
+        await sendSystemNotification({
+            senderId: initiatorId,
+            title: "شحنة بضاعة في الطريق",
+            message: `تم تحويل ${shippedQuantity} قطعة إليكم. المرجع: ${reference}`,
+            type: 'transfer_shipped',
+            relatedId: transfer._id,
+            targetLocationId: destinationLocation // إرسال لفرع المستلم
+        });
+
+        res.status(201).json({ success: true, transfer });
     } catch (err) {
-        return res.status(500).json({ success: false, message: 'خطأ في بدء التحويل.' });
+        res.status(500).json({ success: false, message: "خطأ أثناء بدء التحويل." });
     }
 };
 
 const confirmStockTransfer = async (req, res) => {
     try {
-        const { transferId } = req.params; 
-        const user = req.user;
-        const transfer = await StockTransfer.findById(transferId);
-        
-        if (!transfer || transfer.status !== 'جاري النقل') return res.status(400).json({ success: false, message: "الطلب غير صالح." });
+        const { transferId, receivedQuantity, note } = req.body;
+        const receiverId = req.user.id;
 
-        if (user.role !== 'admin' && user.location.toString() !== transfer.destinationLocation.toString()) {
-            return res.status(403).json({ success: false, message: "لا تملك صلاحية استلام شحنة لهذا الفرع." });
+        const transfer = await StockTransfer.findById(transferId).populate('item');
+        if (!transfer || transfer.status !== 'جاري النقل') {
+            return res.status(400).json({ success: false, message: "التحويل غير موجود أو مكتمل بالفعل." });
         }
 
-        const incomingMovement = new StockMovement({
-            item: transfer.item, location: transfer.destinationLocation, type: 'إضافة', quantity: transfer.quantity,
-            reference: `تحويل وارد: ${transfer.reference || ''}`, user: user._id, reasonType: 'التحويل'
+        const disputeQuantity = transfer.shippedQuantity - receivedQuantity;
+        let finalStatus = 'مكتمل';
+
+        // 1. معالجة حالة العجز (Dispute)
+        if (disputeQuantity > 0) {
+            finalStatus = 'مكتمل مع عجز';
+            transfer.disputeQuantity = disputeQuantity;
+            transfer.disputeNote = note;
+
+            // إرسال إشعار فوري للآدمن بوجود مشكلة
+            await sendSystemNotification({
+                senderId: receiverId,
+                title: "⚠️ تنبيه: عجز في استلام شحنة",
+                message: `تم استلام ${receivedQuantity} من أصل ${transfer.shippedQuantity} للمرجع ${transfer.reference}. السبب: ${note}`,
+                type: 'dispute',
+                relatedId: transfer._id
+            });
+        }
+
+        // 2. تحديث رصيد المخزن المستلم (بالكمية الفعلية فقط)
+        let destInventory = await Inventory.findOne({ 
+            item: transfer.item, 
+            location: transfer.destinationLocation 
         });
-        await incomingMovement.save();
 
-        const uniqueKey = `${transfer.item}-${transfer.destinationLocation}`;
-        const destInv = await Inventory.findOneAndUpdate(
-            { unique_item_location: uniqueKey },
-            { $inc: { quantity: transfer.quantity }, $set: { lastUpdated: Date.now(), item: transfer.item, location: transfer.destinationLocation } },
-            { new: true, upsert: true }
-        );
+        if (destInventory) {
+            destInventory.quantity += Number(receivedQuantity);
+            await destInventory.save();
+        } else {
+            await Inventory.create({
+                item: transfer.item,
+                location: transfer.destinationLocation,
+                quantity: receivedQuantity
+            });
+        }
 
-        transfer.status = 'مكتمل';
-        transfer.incomingMovementId = incomingMovement._id;
+        // 3. تحديث سجل التحويل
+        transfer.receivedQuantity = receivedQuantity;
+        transfer.status = finalStatus;
+        transfer.receivedBy = receiverId;
         await transfer.save();
 
-        return res.status(200).json({ success: true, message: 'تم الاستلام بنجاح.', inventory: destInv });
+        res.status(200).json({ success: true, message: `تم الاستلام بنجاح بحالة: ${finalStatus}` });
     } catch (err) {
-        return res.status(500).json({ success: false, message: 'خطأ في تأكيد الاستلام.' });
+        res.status(500).json({ success: false, message: "خطأ في تأكيد الاستلام." });
     }
 };
 
@@ -540,7 +674,15 @@ const getInventoryReport = async (req, res) => {
     try {
         const user = req.user;
         let query = {};
-        if (user.role !== 'admin' && user.location) { query.location = user.location; }
+
+        if (user.role !== 'admin') {
+            const employee = await Employee.findOne({ userId: user._id });
+            const canAccessBoth = employee?.inventoryPermissions?.accessibleBranches === 'Both';
+
+            if (!canAccessBoth && user.location) { 
+                query.location = user.location; 
+            }
+        }
 
         const reportData = await Inventory.find(query).populate('item').populate({
             path: 'location',
@@ -687,37 +829,45 @@ const getLowStockItems = async (req, res) => {
         
         let query = {};
         
-        // منطق التعامل مع صلاحيات الفروع
+        // 1. منطق التعامل مع صلاحيات الفروع (المطور لدعم "سارة صبري")
         if (req.user.role !== 'admin') {
             const employee = await Employee.findOne({ userId: req.user._id });
             
-            if (!employee || (!employee.branch && !employee.location)) {
+            if (!employee) {
                 return res.status(200).json({ success: true, lowStockItems: [], count: 0 });
             }
 
-            const branchValue = employee.branch || employee.location;
+            // التعديل الجوهري: إذا كان لديه صلاحية Both، نترك الـ query فارغاً ليجلب كل الفروع المتاحة له
+            const canAccessBoth = employee.inventoryPermissions?.accessibleBranches === 'Both';
 
-            // حل مشكلة "Cairo": إذا كانت القيمة نصاً وليست ID
-            if (typeof branchValue === 'string' && branchValue.length !== 24) {
-                // نبحث في جدول Locations عن موقع اسمه يحتوي على كلمة الفرع (مثلاً "مخزن القاهرة")
-                const actualLocation = await Location.findOne({ 
-                    name: { $regex: branchValue, $options: 'i' } 
-                });
-                
-                if (actualLocation) {
-                    query.location = actualLocation._id;
-                } else {
-                    // إذا لم نجد موقع مطابق، نعيد نتيجة فارغة بأمان بدلاً من الانهيار
+            if (!canAccessBoth) {
+                // إذا لم يكن "Both"، نطبق منطقك الأصلي الصارم
+                const branchValue = employee.branch || employee.location;
+
+                if (!branchValue) {
                     return res.status(200).json({ success: true, lowStockItems: [], count: 0 });
                 }
-            } else {
-                query.location = branchValue;
+
+                // منطق معالجة الأسماء النصية (مثل "Cairo") الذي وضعته أنت
+                if (typeof branchValue === 'string' && branchValue.length !== 24) {
+                    const actualLocation = await Location.findOne({ 
+                        name: { $regex: branchValue, $options: 'i' } 
+                    });
+                    
+                    if (actualLocation) {
+                        query.location = actualLocation._id;
+                    } else {
+                        return res.status(200).json({ success: true, lowStockItems: [], count: 0 });
+                    }
+                } else {
+                    query.location = branchValue;
+                }
             }
         } else if (req.query.locationId && req.query.locationId !== 'all') {
             query.location = req.query.locationId;
         }
 
-        // الاستعلام عن النواقص باستخدام alertLimit مع دعم السجلات القديمة
+        // 2. الاستعلام عن النواقص (نفس منطقك الأصلي تماماً)
         const lowStockQuery = {
             ...query,
             $expr: { 
@@ -725,6 +875,7 @@ const getLowStockItems = async (req, res) => {
             }
         };
 
+        // 3. تنفيذ الاستعلام مع الـ Pagination والـ Populate (نفس منطقك الأصلي)
         const [total, items] = await Promise.all([
             Inventory.countDocuments(lowStockQuery),
             Inventory.find(lowStockQuery)
@@ -738,7 +889,7 @@ const getLowStockItems = async (req, res) => {
         res.status(200).json({
             success: true,
             lowStockItems: items,
-            count: total, // سيجعل الرقم يظهر في الجرس فوراً
+            count: total, 
             pagination: {
                 total,
                 page,
@@ -751,7 +902,6 @@ const getLowStockItems = async (req, res) => {
         res.status(500).json({ success: false, message: "Internal Server Error" });
     }
 };
-
 
 const getMonthlyStockMovementReport = async (req, res) => {
     try {
@@ -838,9 +988,123 @@ const getMonthlyStockMovementReportByLocation = async (req, res) => {
     }
 };
 
+const sendSystemNotification = async ({ senderId, title, message, type, relatedId, targetLocationId = null }) => {
+    try {
+        const admins = await User.find({ role: 'admin', isActive: true });
+        let recipientIds = admins.map(admin => admin._id);
+
+        if (targetLocationId) {
+            const branchManagers = await User.find({ 
+                location: targetLocationId, 
+                role: 'employee', 
+                isActive: true 
+            });
+            const managerIds = branchManagers.map(m => m._id);
+            recipientIds = [...new Set([...recipientIds, ...managerIds])]; 
+        }
+
+        const newNotification = new Notification({
+            recipients: recipientIds,
+            sender: senderId,
+            title,
+            message,
+            type,
+            relatedId,
+            isReadBy: [] 
+        });
+
+        await newNotification.save();
+        
+        console.log(`Notification sent: ${title}`);
+    } catch (error) {
+        console.error("خطأ في إرسال الإشعار:", error);
+    }
+};
+
+const getNotifications = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const userRole = req.user.role;
+
+        // جلب الإشعارات التي يكون المستخدم ضمن قائمة مستلميها
+        const notifications = await Notification.find({ 
+            recipients: userId 
+        })
+        .populate('sender', 'name profileImage') // من أرسل الإشعار؟
+        .sort({ createdAt: -1 }) // الأحدث أولاً
+        .limit(20);
+
+        // إضافة حقل "isRead" بشكل ديناميكي لكل إشعار بناءً على المصفوفة
+        const formattedNotifications = notifications.map(notif => {
+            const isRead = notif.isReadBy.includes(userId);
+            return {
+                ...notif._doc,
+                isRead
+            };
+        });
+
+        // حساب عدد الإشعارات غير المقروءة لإظهار الرقم فوق الجرس
+        const unreadCount = notifications.filter(n => !n.isReadBy.includes(userId)).length;
+
+        res.status(200).json({ 
+            success: true, 
+            notifications: formattedNotifications,
+            unreadCount 
+        });
+    } catch (err) {
+        res.status(500).json({ success: false, message: "خطأ في جلب الإشعارات." });
+    }
+};
+
+const markNotificationAsRead = async (req, res) => {
+    try {
+        const { notificationId } = req.params;
+        const userId = req.user.id;
+
+        // استخدام $addToSet لضمان عدم تكرار الـ ID في مصفوفة المقروءات
+        await Notification.findByIdAndUpdate(notificationId, {
+            $addToSet: { isReadBy: userId }
+        });
+
+        res.status(200).json({ success: true, message: "تم تحديد الإشعار كمقروء." });
+    } catch (err) {
+        res.status(500).json({ success: false, message: "خطأ في تحديث حالة الإشعار." });
+    }
+};
+
+const getTransferAnalytics = async (req, res) => {
+    try {
+        const query = {};
+        // إذا كان موظف عادي، يرى تقارير فرعه فقط
+        if (req.user.role !== 'admin') {
+            query.$or = [
+                { sourceLocation: req.user.location },
+                { destinationLocation: req.user.location }
+            ];
+        }
+
+        const stats = await StockTransfer.aggregate([
+            { $match: query },
+            { 
+                $group: { 
+                    _id: "$status", 
+                    count: { $sum: 1 },
+                    totalShipped: { $sum: "$shippedQuantity" },
+                    totalDispute: { $sum: "$disputeQuantity" }
+                } 
+            }
+        ]);
+
+        res.status(200).json({ success: true, stats });
+    } catch (err) {
+        res.status(500).json({ success: false, message: "خطأ في جلب الإحصائيات." });
+    }
+};
+
 export { 
     addItem, getItems, getLocations, addLocation, updateLocation, deleteLocation, 
     updateItem, deleteItem, stockIn, stockOut, addCategory, getCategories, deleteCategory , getItemById, updateItems,
     getInventoryReport, getMonthlyStockMovementReport, getOverallStockTotal, 
-    getMonthlyStockMovementReportByLocation, initiateStockTransfer, confirmStockTransfer, adjustPhysicalInventory, getLowStockItems , getItemFullDetails , bulkUpdateItem , upload 
+    getMonthlyStockMovementReportByLocation, initiateStockTransfer, confirmStockTransfer, adjustPhysicalInventory, getLowStockItems ,
+    getItemFullDetails , bulkUpdateItem , sendSystemNotification , getNotifications , markNotificationAsRead , getTransferAnalytics , upload
 };

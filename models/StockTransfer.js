@@ -3,6 +3,11 @@ const { Schema } = mongoose;
 
 const stockTransferSchema = new Schema(
     {
+        reference: {
+            type: String,
+            required: true,
+            unique: true
+        },
         sourceLocation: {
             type: Schema.Types.ObjectId,
             ref: 'Location',
@@ -18,25 +23,41 @@ const stockTransferSchema = new Schema(
             ref: 'Item',
             required: true
         },
-        quantity: {
+        requestedQuantity: {
+            type: Number,
+            min: 0,
+            default: 0
+        },
+        shippedQuantity: {
             type: Number,
             required: true,
             min: 1
+        },
+        receivedQuantity: {
+            type: Number,
+            min: 0,
+            default: 0
+        },
+        disputeQuantity: {
+            type: Number,
+            default: 0
         },
         status: {
             type: String,
             required: true,
             enum: [
-                'قيد الانتظار', 
-                'جاري النقل',   
-                'مكتمل',       
-                'ملغي'         
+                'طلب توريد',  
+                'قيد الانتظار',   
+                'جاري النقل',
+                'مكتمل',           
+                'مكتمل مع عجز',   
+                'ملغي'
             ],
             default: 'قيد الانتظار'
         },
-        reference: {
+        disputeNote: {
             type: String,
-            default: null
+            default: ""
         },
         outgoingMovementId: {
             type: Schema.Types.ObjectId,
@@ -52,12 +73,19 @@ const stockTransferSchema = new Schema(
             type: Schema.Types.ObjectId,
             ref: 'User',
             required: true 
+        },
+        receivedBy: {
+            type: Schema.Types.ObjectId,
+            ref: 'User',
+            default: null
         }
     },
     {
-        timestamps: true
+        timestamps: true 
     }
 );
+
+stockTransferSchema.index({ createdAt: 1, sourceLocation: 1, destinationLocation: 1 });
 
 const StockTransfer = mongoose.model("StockTransfer", stockTransferSchema);
 export default StockTransfer;

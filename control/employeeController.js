@@ -3,64 +3,113 @@ import Employee from "../models/Employee.js";
 import User from "../models/User.js";
 import bcrypt from 'bcrypt';
 import cloudinary from '../utils/cloudinary.js';
+import mongoose from "mongoose";
 
 const storage = multer.memoryStorage();
 const upload = multer({ storage: storage });
 
+// دالة مساعدة لتحويل النص (Cairo/Mansoura) إلى ObjectId من قاعدة البيانات
+const getBranchIdFromName = async (branchName) => {
+    if (!branchName) return null;
+    // إذا كان المدخل أصلاً ObjectId صالح، نرجعه كما هو
+    if (mongoose.Types.ObjectId.isValid(branchName)) {
+        return branchName;
+    }
+    // أما إذا كان نصاً (مثل Cairo)، نبحث عن الـ ID المقابل له في جدول الـ Locations
+    let searchTerm = branchName;
+    if (branchName.toLowerCase() === 'cairo') searchTerm = 'القاهرة';
+    if (branchName.toLowerCase() === 'mansoura') searchTerm = 'المنصورة';
+    const LocationModel = mongoose.model('Location');
+    const foundLocation = await LocationModel.findOne({
+        name: { $regex: new RegExp(searchTerm, "i") }
+    });
+    return foundLocation ? foundLocation._id : null;
+};
 
-const addEmployee = async(req, res) => {
+
+const addEmployee = async (req, res) => {
     try {
+        // 1. استلام البيانات الأساسية
         const {
             name, email, employeeId, dob, gender, maritalStatus, 
             designation, department, salary, phoneNumber, password, 
-            role, branch, inventoryAccessType, inventoryScope 
+            role, branch, inventoryPermissions 
         } = req.body;
 
-        const user = await User.findOne({email});
-        if(user) return res.status(400).json({success: false , error:"user already registered"});
-        
-        const hashPassword = await bcrypt.hash(password , 10);
-        let imageUrl = '', publicId = '';
+        // 2. التحقق من وجود المستخدم
+        const userExists = await User.findOne({ email });
+        if (userExists) return res.status(400).json({ success: false, error: "المستخدم مسجل بالفعل" });
 
-        if (req.file) {
-            const uploadRes = await new Promise((resolve, reject) => {
-                cloudinary.uploader.upload_stream({ upload_preset: "Employee Platform" }, (err, result) => {
-                    if (err) return reject(err);
-                    resolve(result);
-                }).end(req.file.buffer);
-            });
-            imageUrl = uploadRes.secure_url;
-            publicId = uploadRes.public_id;
+        // 3. معالجة الصلاحيات بحذر (Safe Parsing)
+        let parsedPermissions = { canView: false, canManage: false, accessibleBranches: 'Cairo' };
+        if (inventoryPermissions) {
+            try {
+                // نختبر إذا كان النص المرسل هو JSON فعلاً أم نص عادي
+                parsedPermissions = typeof inventoryPermissions === 'string' 
+                    ? JSON.parse(inventoryPermissions) 
+                    : inventoryPermissions;
+            } catch (e) {
+                console.error("Permission Parsing Error:", e);
+            }
         }
 
+        // 4. معالجة الفرع
+        const finalBranchId = await getBranchIdFromName(branch);
+
+        // 5. رفع الصورة إلى Cloudinary (إذا وجدت)
+        let imageUrl = '', publicId = '';
+        if (req.file) {
+            try {
+                const uploadRes = await new Promise((resolve, reject) => {
+                    cloudinary.uploader.upload_stream(
+                        { folder: "Employee Platform" }, // تأكد من اسم الفولدر
+                        (err, result) => {
+                            if (err) return reject(err);
+                            resolve(result);
+                        }
+                    ).end(req.file.buffer);
+                });
+                imageUrl = uploadRes.secure_url;
+                publicId = uploadRes.public_id;
+            } catch (uploadError) {
+                console.error("Cloudinary Upload Error:", uploadError);
+                // يمكننا اختيار إكمال العملية بدون صورة أو التوقف هنا
+            }
+        }
+
+        // 6. تشفير كلمة المرور وحفظ المستخدم
+        const hashPassword = await bcrypt.hash(password, 10);
         const newUser = new User({
-            name, email, password: hashPassword, role, 
-            profileImage: imageUrl, profileImagePublicId: publicId 
+            name, email, password: hashPassword, 
+            role: role || 'employee', 
+            profileImage: imageUrl, 
+            profileImagePublicId: publicId,
+            location: finalBranchId
         });
         const savedUser = await newUser.save();
+
+        // 7. حفظ بيانات الموظف
         const newEmployee = new Employee({
             userId: savedUser._id,
-            employeeId: employeeId || `ADM-${Date.now()}`,
-            dob, 
-            gender, 
-            maritalStatus, 
-            designation: designation || (role === 'admin' ? 'System Admin' : 'Staff'), 
-            department, 
-            salary: salary || 0, 
-            phoneNumber,
-            branch: branch || 'Cairo', 
+            employeeId: employeeId || `EMP-${Date.now()}`,
+            dob, gender, maritalStatus, 
+            designation, department, salary, phoneNumber,
+            branch: finalBranchId,
             inventoryPermissions: {
-                canView: role === 'admin' ? true : (inventoryAccessType === 'view' || inventoryAccessType === 'manage'),
-                canManage: role === 'admin' ? true : (inventoryAccessType === 'manage'),
-                accessibleBranches: role === 'admin' ? 'Both' : (inventoryScope || branch || 'Cairo')
+                canView: role === 'admin' ? true : parsedPermissions.canView,
+                canManage: role === 'admin' ? true : parsedPermissions.canManage,
+                accessibleBranches: parsedPermissions.accessibleBranches === 'Both' 
+                    ? 'Both' 
+                    : (await getBranchIdFromName(parsedPermissions.accessibleBranches || branch))
             }
         });
 
         await newEmployee.save();
+        return res.status(200).json({ success: true, message: 'تمت الإضافة بنجاح مع الصورة والصلاحيات' });
 
-        return res.status(200).json({success: true , message:'User created successfully with profile details'});
-    } catch(err){
-        return res.status(500).json({success: false , message: err.message})
+    } catch (err) {
+        console.error("Main Controller Error:", err);
+        return res.status(500).json({ success: false, error: err.message });
     }
 };
 
@@ -69,62 +118,78 @@ const updatedEmployee = async (req, res) => {
         const { id } = req.params;
         const {
             name, maritalStatus, designation, department, 
-            salary, phoneNumber, branch, inventoryAccessType, inventoryScope 
+            salary, phoneNumber, branch, inventoryPermissions 
         } = req.body; 
 
-        let employee = await Employee.findById(id);
-        if (!employee) {
-            employee = await Employee.findOne({ userId: id });
-        }
+        // 1. البحث عن الموظف
+        let employee = await Employee.findById(id) || await Employee.findOne({ userId: id });
+        if (!employee) return res.status(404).json({ success: false, message: 'الموظف غير موجود' });
 
-        if (!employee) {
-            return res.status(404).json({ success: false, message: 'لم يتم العثور على بيانات الموظف أو المسؤول' });
-        }
-
-        const user = await User.findById(employee.userId);
-        if (!user) return res.status(404).json({ success: false, message: 'المستخدم غير موجود' });
-
-        let updateUserFields = { name };
-        if (req.file) {
-            const uploadRes = await new Promise((resolve, reject) => {
-                cloudinary.uploader.upload_stream({ upload_preset: "Employee Platform" }, (err, result) => {
-                    if (err) return reject(err);
-                    resolve(result);
-                }).end(req.file.buffer);
-            });
-            updateUserFields.profileImage = uploadRes.secure_url;
-            updateUserFields.profileImagePublicId = uploadRes.public_id;
-            
-            if (user.profileImagePublicId) {
-                await cloudinary.uploader.destroy(user.profileImagePublicId);
+        // 2. معالجة الصلاحيات بشكل آمن (Safe Parsing)
+        let parsedPermissions = employee.inventoryPermissions; // كقيمة افتراضية نبقي القديم
+        if (inventoryPermissions) {
+            try {
+                parsedPermissions = typeof inventoryPermissions === 'string' 
+                    ? JSON.parse(inventoryPermissions) 
+                    : inventoryPermissions;
+            } catch (e) {
+                console.error("Error parsing permissions during update:", e);
             }
         }
+
+        // 3. ترجمة الفرع إلى ID
+        const finalBranchId = await getBranchIdFromName(branch);
+
+        // 4. معالجة الصورة الجديدة (إذا تم رفع صورة)
+        let updateUserFields = { name, location: finalBranchId };
+        
+        if (req.file) {
+            try {
+                const uploadRes = await new Promise((resolve, reject) => {
+                    cloudinary.uploader.upload_stream(
+                        { folder: "Employee Platform" }, 
+                        (err, result) => {
+                            if (err) return reject(err);
+                            resolve(result);
+                        }
+                    ).end(req.file.buffer);
+                });
+                updateUserFields.profileImage = uploadRes.secure_url;
+                updateUserFields.profileImagePublicId = uploadRes.public_id;
+            } catch (uploadError) {
+                console.error("Cloudinary Update Error:", uploadError);
+            }
+        }
+        
+        // تحديث بيانات الـ User
         await User.findByIdAndUpdate(employee.userId, updateUserFields);
 
-        const isSystemAdmin = user.role === 'admin';
-
+        // 5. تحديث بيانات الـ Employee
         const updatedData = {
-            maritalStatus,
-            designation: designation || (isSystemAdmin ? "System Admin" : undefined),
-            salary,
-            department,
+            maritalStatus, 
+            designation, 
+            salary, 
+            department, 
             phoneNumber,
-            branch,
+            branch: finalBranchId,
             inventoryPermissions: {
-                canView: isSystemAdmin ? true : (inventoryAccessType === 'view' || inventoryAccessType === 'manage'),
-                canManage: isSystemAdmin ? true : (inventoryAccessType === 'manage'),
-                accessibleBranches: isSystemAdmin ? 'Both' : (inventoryScope || branch || 'Cairo')
-            }
+                canView: parsedPermissions.canView,
+                canManage: parsedPermissions.canManage,
+                accessibleBranches: parsedPermissions.accessibleBranches === 'Both' 
+                    ? 'Both' 
+                    : (await getBranchIdFromName(parsedPermissions.accessibleBranches || branch))
+            },
+            updateAt: Date.now()
         };
 
         await Employee.findByIdAndUpdate(employee._id, updatedData);
 
-        return res.status(200).json({ success: true, message: 'تم تحديث البيانات بنجاح' });
+        return res.status(200).json({ success: true, message: 'تم تحديث البيانات والصورة بنجاح' });
     } catch (err) {
-        console.error("Update Error:", err);
-        return res.status(500).json({ success: false, message: err.message });
+        console.error("Update Controller Error:", err);
+        return res.status(500).json({ success: false, error: err.message });
     }
-}
+};
 
 const getEmployees = async (req, res) => {
     try {
@@ -180,42 +245,20 @@ const fetchEmpolyeeById = async(req , res)=>{
 const getMyProfile = async (req, res) => {
     try {
         const userId = req.user._id;
+        // نستخدم populate لجلب اسم الموقع الفعلي بدلاً من الـ ID فقط
         const employee = await Employee.findOne({ userId })
             .populate('userId', { password: 0 })
-            .populate('department');
+            .populate('department')
+            .populate('branch'); // جلب بيانات الفرع كاملة (Name, ID, etc.)
 
-        if (!employee) {
-            return res.status(404).json({ success: false, message: 'Employee not found' });
-        }
+        if (!employee) return res.status(404).json({ success: false, message: 'Employee not found' });
 
         const formattedEmployee = employee.toObject();
-
-        // --- التعديل الجوهري هنا ---
-        // تحويل الـ ID الخاص بالفرع إلى اسم نصي مفهوم للفلترة في الفرونت إند
-        let branchDisplay = "";
-        // ID المنصورة من صورتك ينتهي بـ 3703
-        if (employee.branch === "6788e0261394c866c1383703" || employee.branch === "Mansoura") {
-            branchDisplay = "مخزن المنصورة";
-        } 
-        // ID القاهرة من صورتك ينتهي بـ 36f4
-        else if (employee.branch === "6788dfcf1394c866c13836f4" || employee.branch === "Cairo") {
-            branchDisplay = "مخزن القاهرة";
-        } else {
-            branchDisplay = employee.branch; // أي قيمة أخرى
-        }
-
-        formattedEmployee.branchName = branchDisplay; 
         
-        formattedEmployee.inventoryPermissions = {
-            accessType: employee.inventoryPermissions.canManage ? 'manage' : 
-                        (employee.inventoryPermissions.canView ? 'view' : 'none'),
-            accessibleBranches: employee.inventoryPermissions.accessibleBranches || branchDisplay
-        };
-
-        return res.status(200).json({ 
-            success: true, 
-            employee: formattedEmployee 
-        });
+        // إرسال اسم الفرع للفرونت إند لسهولة العرض
+        formattedEmployee.branchName = employee.branch ? employee.branch.name : "غير محدد";
+        
+        return res.status(200).json({ success: true, employee: formattedEmployee });
     } catch (err) {
         return res.status(500).json({ success: false, message: err.message });
     }
